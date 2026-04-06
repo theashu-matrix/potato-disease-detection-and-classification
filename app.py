@@ -6,6 +6,8 @@ from PIL import Image
 import json
 from fpdf import FPDF
 from datetime import datetime
+import os
+import tempfile
 
 # --- CONFIGURATION ---
 # Set to False for IBM Review (Binary: Healthy vs Disease)
@@ -257,28 +259,148 @@ def predict(image, model):
         predicted_class = class_names[top_class.item()]
     return predicted_class, confidence
 
-def create_pdf_report(prediction, confidence, img_filename):
+def create_pdf_report(prediction, confidence, uploaded_file, info):
     pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="AgroScan AI - Analysis Report", ln=True, align='C')
-    
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt=f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
-    pdf.ln(10)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(200, 10, txt=f"Diagnosis Result: {prediction}", ln=True)
-    pdf.cell(200, 10, txt=f"AI Confidence: {confidence:.2f}%", ln=True)
-    
-    if prediction != "Healthy":
-        pdf.set_text_color(194, 24, 7) # Red
-        pdf.cell(200, 10, txt="Status: IMMEDIATE ATTENTION REQUIRED", ln=True)
-    else:
-        pdf.set_text_color(46, 125, 50) # Green
-        pdf.cell(200, 10, txt="Status: CROP IS HEALTHY", ln=True)
-        
-    return pdf.output(dest="S").encode("latin-1")
+
+    page_width = pdf.w - pdf.l_margin - pdf.r_margin
+    image_temp_path = None
+
+    def add_section_title(title):
+        pdf.ln(2)
+        pdf.set_font("Arial", 'B', 13)
+        pdf.set_text_color(27, 94, 32)
+        pdf.cell(0, 8, txt=title, ln=True)
+        pdf.set_text_color(0, 0, 0)
+
+    def add_body_text(text, indent=0):
+        content = text if text else "N/A"
+        x_position = pdf.l_margin + indent
+        width = page_width - indent
+        pdf.set_x(x_position)
+        pdf.multi_cell(width, 7, txt=content)
+
+    def add_label_value(label, value):
+        pdf.set_font("Arial", 'B', 11)
+        pdf.cell(0, 7, txt=f"{label}:", ln=True)
+        pdf.set_font("Arial", size=11)
+        add_body_text(value, indent=4)
+
+    def add_bullet_list(items):
+        if not items:
+            add_body_text("- N/A")
+            return
+        pdf.set_font("Arial", size=11)
+        for item in items:
+            add_body_text(f"- {item}")
+
+    try:
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(0, 10, txt="AgroScan AI - Analysis Report", ln=True, align='C')
+
+        pdf.set_font("Arial", size=12)
+        pdf.cell(0, 8, txt=f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
+        if uploaded_file is not None:
+            pdf.cell(0, 8, txt=f"Uploaded File: {uploaded_file.name}", ln=True, align='C')
+        pdf.ln(4)
+
+        if uploaded_file is not None:
+            suffix = os.path.splitext(uploaded_file.name)[1] or ".png"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_image:
+                temp_image.write(uploaded_file.getvalue())
+                image_temp_path = temp_image.name
+
+            try:
+                image_width = min(page_width, 90)
+                pdf.image(image_temp_path, x=pdf.l_margin + ((page_width - image_width) / 2), w=image_width)
+                pdf.ln(4)
+            except RuntimeError:
+                pass
+
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(0, 8, txt=f"Diagnosis Result: {prediction}", ln=True)
+        pdf.cell(0, 8, txt=f"AI Confidence: {confidence:.2f}%", ln=True)
+
+        disease_name = info.get("disease_name") if info else None
+        disease_type = info.get("disease_type") if info else None
+        if disease_name:
+            pdf.cell(0, 8, txt=f"Expert Classification: {disease_name}", ln=True)
+        if disease_type:
+            pdf.cell(0, 8, txt=f"Disease Type: {disease_type}", ln=True)
+
+        if prediction != "Healthy":
+            pdf.set_text_color(194, 24, 7)
+            pdf.cell(0, 8, txt="Status: IMMEDIATE ATTENTION REQUIRED", ln=True)
+        else:
+            pdf.set_text_color(46, 125, 50)
+            pdf.cell(0, 8, txt="Status: CROP IS HEALTHY", ln=True)
+        pdf.set_text_color(0, 0, 0)
+
+        if info:
+            summary = info.get("summary", {})
+            preventive_measures = info.get("preventive_measures", {})
+            medicines = info.get("medicines", [])
+
+            add_section_title("Summary")
+            add_label_value("What is it", summary.get("what_is_it"))
+            add_label_value("Why it occurs", summary.get("why_it_occurs"))
+            add_label_value("How it spreads", summary.get("how_it_spreads"))
+
+            add_section_title("Immediate Actions")
+            add_body_text(summary.get("immediate_action"))
+
+            add_section_title("Avoid")
+            add_body_text(summary.get("what_to_avoid"))
+
+            add_section_title("Medicines")
+            if medicines:
+                for index, med in enumerate(medicines, start=1):
+                    pdf.set_font("Arial", 'B', 11)
+                    pdf.cell(0, 7, txt=f"Medicine {index}", ln=True)
+                    pdf.set_font("Arial", size=11)
+                    add_body_text(f"Name: {med.get('medicine_name', 'N/A')}")
+                    add_body_text(f"Ingredient: {med.get('active_ingredient', 'N/A')}")
+                    add_body_text(f"Dosage: {med.get('dosage', 'N/A')}")
+                    add_body_text(f"Method: {med.get('application_method', 'N/A')}")
+                    purchase_links = med.get("purchase_links", [])
+                    if purchase_links:
+                        add_body_text(f"Availability: {', '.join(purchase_links)}")
+                    pdf.ln(1)
+            else:
+                add_body_text("No medicine recommendation listed.")
+
+            add_section_title("Preventive Measures")
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(0, 7, txt="Cultural", ln=True)
+            add_bullet_list(preventive_measures.get("cultural", []))
+
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(0, 7, txt="Biological", ln=True)
+            add_bullet_list(preventive_measures.get("biological", []))
+
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(0, 7, txt="Chemical", ln=True)
+            add_bullet_list(preventive_measures.get("chemical", []))
+
+            precautions = preventive_measures.get("precautions", [])
+            if precautions:
+                pdf.set_font("Arial", 'B', 11)
+                pdf.cell(0, 7, txt="Precautions", ln=True)
+                add_bullet_list(precautions)
+
+            add_section_title("Disclaimer")
+            pdf.set_font("Arial", 'I', 10)
+            add_body_text(info.get("disclaimer"))
+        else:
+            add_section_title("Disclaimer")
+            pdf.set_font("Arial", 'I', 10)
+            add_body_text("Detailed expert data was not available for this prediction.")
+
+        return pdf.output(dest="S").encode("latin-1")
+    finally:
+        if image_temp_path and os.path.exists(image_temp_path):
+            os.remove(image_temp_path)
 
 # --- 3. MAIN APP LAYOUT ---
 def main():
@@ -382,7 +504,7 @@ def main():
                         
                         # --- REPORT DOWNLOAD ---
                         st.markdown("---")
-                        pdf_bytes = create_pdf_report(display_pred, confidence, uploaded_file.name)
+                        pdf_bytes = create_pdf_report(display_pred, confidence, uploaded_file, info)
                         st.download_button(
                             label="📄 Download Official PDF Report",
                             data=pdf_bytes,
